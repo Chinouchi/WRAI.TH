@@ -35,11 +35,9 @@ jobs:
             runner: ubuntu-latest
             cc: aarch64-linux-gnu-gcc
             ext: ""
-          - os: windows
-            arch: amd64
-            runner: ubuntu-latest
-            cc: x86_64-w64-mingw32-gcc
-            ext: ".exe"
+          # Windows build temporarily disabled — internal/lock uses syscall.Flock
+          # which is POSIX-only. Re-enable once a Windows-compatible lock path
+          # is implemented.
 
     steps:
       - uses: actions/checkout@v4
@@ -52,7 +50,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
 
       - name: Build
         env:
@@ -93,7 +91,12 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
+          # nullglob makes unmatched globs expand to nothing (no .zip if no
+          # Windows build is in the matrix).
+          shopt -s nullglob
+
           VERSION="${GITHUB_REF_NAME}"
 
           # Create release if it doesn't exist, then upload assets
