@@ -7,13 +7,11 @@ on:
   push:
     paths:
       - 'install.sh'
-      - 'install.ps1'
       - 'scripts/install.sh'
       - '.github/workflows/test-install.yml'
   pull_request:
     paths:
       - 'install.sh'
-      - 'install.ps1'
       - 'scripts/install.sh'
   workflow_dispatch:
 
@@ -77,29 +75,6 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
           agent-relay --version
-
-  test-windows:
-    name: Windows amd64
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run installer
-        shell: pwsh
-        run: |
-          . .\install.ps1 -NoService -SkipProjects
-
-      - name: Verify binary
-        shell: pwsh
-        run: |
-          $binPath = Join-Path $env:LOCALAPPDATA "AgentRelay\agent-relay.exe"
-          if (Test-Path $binPath) {
-            & $binPath --version
-          } else {
-            Write-Error "Binary not found at $binPath"
-            Get-ChildItem $env:LOCALAPPDATA -Recurse -Filter "agent-relay*" | Select FullName
-            exit 1
-          }
 
   test-source-build:
     name: Source build (Go + GCC)

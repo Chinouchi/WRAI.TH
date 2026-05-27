@@ -45,7 +45,7 @@ body:
       options:
         - MCP tools
         - Web UI (Galaxy / Colony)
-        - Installer (install.sh / install.ps1)
+        - Installer (install.sh)
         - REST API
         - Memory / Vault
         - Tasks / Goals

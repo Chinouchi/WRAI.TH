@@ -29,8 +29,9 @@ internal/
   models/     Shared structs
 docs/         Embedded relay documentation (go:embed, indexed as _relay project)
 skill/        /relay skill for Claude Code
-install.sh    macOS/Linux installer
-install.ps1   Windows installer
+install.sh    macOS/Linux installer (bootstrapper)
+scripts/install.sh
+              Real installer, packaged as release asset
 ```
 
 ## How to contribute a new feature
@@ -133,7 +134,7 @@ main (protected)
 Releases are tag-driven:
 
 1. Maintainer tags `main` with `vX.Y.Z` (semver)
-2. **Release workflow** runs: cross-compiles 5 binaries (darwin/arm64, darwin/amd64, linux/amd64, linux/arm64, windows/amd64) with `-tags fts5`
-3. GitHub Release is created with all binaries + install scripts
-4. **Test Installers workflow** triggers automatically: tests the one-liner on 7 environments (3 Linux distros, 2 macOS, Windows, source build)
-5. Users get the update via `install.sh` / `install.ps1` (always pulls latest release)
+2. **Release workflow** runs: cross-compiles 4 binaries (darwin/arm64, darwin/amd64, linux/amd64, linux/arm64) with `-tags fts5`
+3. GitHub Release is created with all binaries + install script
+4. **Test Installers workflow** triggers automatically: tests the one-liner on 6 environments (3 Linux distros, 2 macOS, source build)
+5. Users get the update via `install.sh` (always pulls latest release)
