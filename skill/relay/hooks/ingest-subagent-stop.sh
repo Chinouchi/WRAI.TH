@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+command -v jq &>/dev/null || exit 0
+
 EVENTS_DIR="$HOME/.pixel-office/events"
 mkdir -p "$EVENTS_DIR"
 

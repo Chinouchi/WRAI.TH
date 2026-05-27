@@ -17,6 +17,14 @@ BINARY_NAME="agent-relay"
 SERVICE_LABEL="com.agent-relay"
 DEFAULT_PORT=8090
 
+# Stamped by the release workflow before this script is uploaded as a release
+# asset. When unstamped (dev / source checkout), falls back to "main" so URLs
+# resolve to the current repo state.
+RELAY_VERSION="@@RELAY_VERSION@@"
+if [[ "$RELAY_VERSION" == "@@RELAY_VERSION@@" ]] || [[ -z "$RELAY_VERSION" ]]; then
+  RELAY_VERSION="main"
+fi
+
 # ── Colors ───────────────────────────────────────────────────────────────────
 
 if [[ -t 1 ]] && command -v tput &>/dev/null && [[ $(tput colors 2>/dev/null || echo 0) -ge 8 ]]; then
@@ -73,7 +81,16 @@ spinner_stop() {
   fi
 }
 
-trap 'spinner_stop' EXIT
+SKILL_BUNDLE_DIR=""
+
+cleanup_on_exit() {
+  spinner_stop
+  if [[ -n "$SKILL_BUNDLE_DIR" ]] && [[ -d "$SKILL_BUNDLE_DIR" ]]; then
+    rm -rf "$SKILL_BUNDLE_DIR"
+  fi
+}
+
+trap 'cleanup_on_exit' EXIT
 
 # ── Args ─────────────────────────────────────────────────────────────────────
 
@@ -223,6 +240,59 @@ do_uninstall() {
   if [[ -f "$legacy_cmd" ]]; then
     rm -f "$legacy_cmd"
     success "Removed legacy /relay command"
+  fi
+
+  # Remove activity hooks (scripts + settings.json entries)
+  local hooks_dir="$HOME/.claude/hooks"
+  local settings_file="$HOME/.claude/settings.json"
+  local hook_scripts=(
+    "ingest-pre-tool.sh"
+    "ingest-post-tool.sh"
+    "ingest-stop.sh"
+    "ingest-subagent-start.sh"
+    "ingest-subagent-stop.sh"
+  )
+  local removed_count=0
+  for script in "${hook_scripts[@]}"; do
+    if [[ -f "${hooks_dir}/${script}" ]]; then
+      rm -f "${hooks_dir}/${script}"
+      ((removed_count++))
+    fi
+  done
+  if [[ $removed_count -gt 0 ]]; then
+    success "Removed ${removed_count} activity hook script(s)"
+  fi
+
+  # Strip our entries from settings.json (match by command path prefix)
+  if [[ -f "$settings_file" ]] && command -v python3 &>/dev/null; then
+    cp "$settings_file" "${settings_file}.bak" 2>/dev/null || true
+    python3 -c "
+import json, os
+
+path = os.path.expanduser('$settings_file')
+with open(path) as f:
+    data = json.load(f)
+
+prefix = '${hooks_dir}/ingest-'
+hooks = data.get('hooks', {})
+for event in list(hooks.keys()):
+    hooks[event] = [
+        h for h in hooks[event]
+        if not (isinstance(h, dict) and any(
+            sub.get('command', '').startswith(prefix)
+            for sub in h.get('hooks', [])
+            if isinstance(sub, dict)
+        ))
+    ]
+    if not hooks[event]:
+        del hooks[event]
+if not hooks:
+    data.pop('hooks', None)
+
+with open(path, 'w') as f:
+    json.dump(data, f, indent=4)
+    f.write('\n')
+" 2>/dev/null && info "Cleaned hook entries from ${DIM}${settings_file}${RESET}"
   fi
 
   # Data directory
@@ -402,8 +472,18 @@ try_build_from_source() {
   local tmpdir
   tmpdir=$(mktemp -d)
 
-  spinner_start "Cloning repository"
-  if ! git clone --depth 1 "https://github.com/${REPO}.git" "$tmpdir/src" &>/dev/null 2>&1; then
+  local ver
+  ver=$(target_release)
+
+  # Clone the matching tag when one is available; fall back to default branch
+  # when no release exists (fresh fork) or in dev mode.
+  local -a clone_args=(--depth 1)
+  if [[ "$ver" != "dev" ]] && [[ "$ver" != "main" ]]; then
+    clone_args+=(--branch "$ver")
+  fi
+
+  spinner_start "Cloning ${ver}"
+  if ! git clone "${clone_args[@]}" "https://github.com/${REPO}.git" "$tmpdir/src" &>/dev/null 2>&1; then
     spinner_stop
     warn "Clone failed, will download prebuilt"
     rm -rf "$tmpdir"
@@ -413,7 +493,7 @@ try_build_from_source() {
 
   local build_output="${PWD}/agent-relay"
   spinner_start "Building binary (this may take a minute)"
-  if ! (cd "$tmpdir/src" && CGO_ENABLED=1 go build -tags fts5 -ldflags="-s -w -X main.Version=$(get_latest_version)" -o "$build_output" . 2>/dev/null); then
+  if ! (cd "$tmpdir/src" && CGO_ENABLED=1 go build -tags fts5 -ldflags="-s -w -X main.Version=${ver}" -o "$build_output" . 2>/dev/null); then
     spinner_stop
     warn "Build failed, will download prebuilt"
     rm -rf "$tmpdir"
@@ -425,7 +505,14 @@ try_build_from_source() {
   return 0
 }
 
-get_latest_version() {
+target_release() {
+  # If the installer was stamped at release time, use that exact version so
+  # binaries, source, skill, and hooks all match. Otherwise query the API for
+  # the latest published release.
+  if [[ "$RELAY_VERSION" != "main" ]]; then
+    echo "$RELAY_VERSION"
+    return 0
+  fi
   local version
   version=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
     | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
@@ -435,8 +522,8 @@ get_latest_version() {
 download_prebuilt() {
   local bin_path="$1"
   local version
-  version=$(get_latest_version)
-  if [[ "$version" == "dev" ]]; then
+  version=$(target_release)
+  if [[ "$version" == "dev" ]] || [[ "$version" == "main" ]]; then
     die "No releases found and Go not available. Install Go (https://go.dev/dl/) and retry."
   fi
 
@@ -462,6 +549,52 @@ download_prebuilt() {
   # Create 'ar' shortcut symlink
   create_ar_symlink "$bin_path"
   success "Installed ${BOLD}${version}${RESET} from prebuilt"
+}
+
+# ── Skill bundle ─────────────────────────────────────────────────────────────
+#
+# Downloads `skill-relay.tar.gz` from the target release (one HTTP request) and
+# extracts it to a temp dir. Both install_hooks and install_skill consume the
+# extracted files. On failure (asset missing on an older release, or running in
+# dev mode), falls back to per-file raw fetch from RELAY_VERSION.
+#
+# Result lives in $SKILL_BUNDLE_DIR with this layout:
+#   $SKILL_BUNDLE_DIR/SKILL.md
+#   $SKILL_BUNDLE_DIR/references/tools-reference.md
+#   $SKILL_BUNDLE_DIR/hooks/ingest-*.sh
+
+ensure_skill_bundle() {
+  [[ -n "$SKILL_BUNDLE_DIR" ]] && return 0
+
+  SKILL_BUNDLE_DIR=$(mktemp -d)
+
+  # Try the release tarball first.
+  local version
+  version=$(target_release)
+  if [[ "$version" != "dev" ]] && [[ "$version" != "main" ]]; then
+    local url="https://github.com/${REPO}/releases/download/${version}/skill-relay.tar.gz"
+    if curl -fsSL "$url" -o "$SKILL_BUNDLE_DIR/bundle.tar.gz" 2>/dev/null \
+       && tar -xzf "$SKILL_BUNDLE_DIR/bundle.tar.gz" -C "$SKILL_BUNDLE_DIR" 2>/dev/null; then
+      rm -f "$SKILL_BUNDLE_DIR/bundle.tar.gz"
+      return 0
+    fi
+    rm -f "$SKILL_BUNDLE_DIR/bundle.tar.gz"
+  fi
+
+  # Fallback: per-file raw fetch. Used when the tarball asset is missing on
+  # the targeted release (older releases) or in dev mode (RELAY_VERSION=main).
+  mkdir -p "$SKILL_BUNDLE_DIR/references" "$SKILL_BUNDLE_DIR/hooks"
+  local raw_base="https://raw.githubusercontent.com/${REPO}/${RELAY_VERSION}/skill/relay"
+  curl -fsSL "${raw_base}/SKILL.md" \
+    -o "$SKILL_BUNDLE_DIR/SKILL.md" 2>/dev/null || true
+  curl -fsSL "${raw_base}/references/tools-reference.md" \
+    -o "$SKILL_BUNDLE_DIR/references/tools-reference.md" 2>/dev/null || true
+  local h
+  for h in ingest-pre-tool.sh ingest-post-tool.sh ingest-stop.sh \
+           ingest-subagent-start.sh ingest-subagent-stop.sh; do
+    curl -fsSL "${raw_base}/hooks/${h}" \
+      -o "$SKILL_BUNDLE_DIR/hooks/${h}" 2>/dev/null || true
+  done
 }
 
 # ── Step 2: Install service ─────────────────────────────────────────────────
@@ -583,57 +716,66 @@ install_hooks() {
   local settings_file="$HOME/.claude/settings.json"
   mkdir -p "$hooks_dir"
 
-  # Create PostToolUse hook script
-  cat > "$hooks_dir/ingest-post-tool.sh" <<'HOOK_EOF'
-#!/usr/bin/env bash
-command -v jq &>/dev/null || exit 0
+  ensure_skill_bundle
 
-EVENTS_DIR="$HOME/.pixel-office/events"
-mkdir -p "$EVENTS_DIR"
+  # Claude Code hook event → script filename
+  local hooks_map=(
+    "PreToolUse:ingest-pre-tool.sh"
+    "PostToolUse:ingest-post-tool.sh"
+    "Stop:ingest-stop.sh"
+    "SubagentStart:ingest-subagent-start.sh"
+    "SubagentStop:ingest-subagent-stop.sh"
+  )
 
-INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
-TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // "unknown"')
-TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  local installed_scripts=()
+  local missing_scripts=()
+  for entry in "${hooks_map[@]}"; do
+    local script="${entry#*:}"
+    local src="${SKILL_BUNDLE_DIR}/hooks/${script}"
+    local dest="${hooks_dir}/${script}"
+    if [[ -f "$src" ]]; then
+      install -m 755 "$src" "$dest"
+      installed_scripts+=("$script")
+    else
+      missing_scripts+=("$script")
+    fi
+  done
 
-FILENAME="$EVENTS_DIR/tool-end-$$-$(date +%s).json"
-TMP="$FILENAME.tmp"
-printf '{"type":"tool_end","session_id":"%s","tool":"%s","ts":"%s"}' \
-  "$SESSION_ID" "$TOOL_NAME" "$TS" > "$TMP"
-mv "$TMP" "$FILENAME"
+  if [[ ${#installed_scripts[@]} -eq 0 ]]; then
+    warn "No hooks found in skill bundle (${SKILL_BUNDLE_DIR})"
+    warn "Activity tracking will not work"
+    return 0
+  fi
 
-exit 0
-HOOK_EOF
-  chmod +x "$hooks_dir/ingest-post-tool.sh"
+  if [[ ${#missing_scripts[@]} -gt 0 ]]; then
+    warn "Some hooks missing from bundle: ${missing_scripts[*]}"
+  fi
 
-  # Create Stop hook script
-  cat > "$hooks_dir/ingest-stop.sh" <<'HOOK_EOF'
-#!/usr/bin/env bash
-command -v jq &>/dev/null || exit 0
-
-EVENTS_DIR="$HOME/.pixel-office/events"
-mkdir -p "$EVENTS_DIR"
-
-INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
-TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-FILENAME="$EVENTS_DIR/stop-$$-$(date +%s).json"
-TMP="$FILENAME.tmp"
-printf '{"type":"stop","session_id":"%s","tool":"","file":"","ts":"%s"}' \
-  "$SESSION_ID" "$TS" > "$TMP"
-mv "$TMP" "$FILENAME"
-
-exit 0
-HOOK_EOF
-  chmod +x "$hooks_dir/ingest-stop.sh"
-
-  # Merge hooks into Claude Code settings.json (backup first)
+  # Backup settings.json before merging
   if [[ -f "$settings_file" ]]; then
     cp "$settings_file" "${settings_file}.bak" 2>/dev/null || true
   fi
-  if command -v python3 &>/dev/null; then
-    python3 -c "
+
+  if ! command -v python3 &>/dev/null; then
+    warn "Hook auto-config requires python3 — add hooks manually to ${BOLD}${settings_file}${RESET}"
+    return 0
+  fi
+
+  # Build Python list of (event, command) for installed hooks only
+  local py_entries=""
+  for entry in "${hooks_map[@]}"; do
+    local event="${entry%%:*}"
+    local script="${entry#*:}"
+    local installed=false
+    local s
+    for s in "${installed_scripts[@]}"; do
+      [[ "$s" == "$script" ]] && installed=true && break
+    done
+    [[ "$installed" == true ]] || continue
+    py_entries+="    ('${event}', '${hooks_dir}/${script}'),"$'\n'
+  done
+
+  python3 -c "
 import json, os
 
 path = os.path.expanduser('$settings_file')
@@ -644,42 +786,27 @@ if os.path.exists(path):
 
 hooks = data.setdefault('hooks', {})
 
-# PostToolUse hook
-post_hooks = hooks.setdefault('PostToolUse', [])
-hook_cmd = '$hooks_dir/ingest-post-tool.sh'
-already = any(
-    h.get('hooks', [{}])[0].get('command', '') == hook_cmd
-    if isinstance(h, dict) else False
-    for h in post_hooks
-)
-if not already:
-    post_hooks.append({
-        'hooks': [{'type': 'command', 'command': hook_cmd, 'timeout': 5}]
-    })
+entries = [
+${py_entries}]
 
-# Stop hook
-stop_hooks = hooks.setdefault('Stop', [])
-stop_cmd = '$hooks_dir/ingest-stop.sh'
-already = any(
-    h.get('hooks', [{}])[0].get('command', '') == stop_cmd
-    if isinstance(h, dict) else False
-    for h in stop_hooks
-)
-if not already:
-    stop_hooks.append({
-        'hooks': [{'type': 'command', 'command': stop_cmd, 'timeout': 5}]
-    })
+for event, hook_cmd in entries:
+    event_hooks = hooks.setdefault(event, [])
+    already = any(
+        h.get('hooks', [{}])[0].get('command', '') == hook_cmd
+        if isinstance(h, dict) else False
+        for h in event_hooks
+    )
+    if not already:
+        event_hooks.append({
+            'hooks': [{'type': 'command', 'command': hook_cmd, 'timeout': 5}]
+        })
 
 with open(path, 'w') as f:
     json.dump(data, f, indent=4)
     f.write('\n')
 " 2>/dev/null
-    success "Installed activity hooks (PostToolUse + Stop)"
-  elif command -v jq &>/dev/null; then
-    warn "Hook auto-config requires python3 — add hooks manually to ${BOLD}${settings_file}${RESET}"
-  else
-    warn "No python3 or jq — add hooks manually to ${BOLD}${settings_file}${RESET}"
-  fi
+
+  success "Installed activity hooks (${#installed_scripts[@]} of ${#hooks_map[@]})"
 }
 
 # ── Step 4: Install skill ───────────────────────────────────────────────────
@@ -689,8 +816,6 @@ install_skill() {
 
   local skill_dir="$HOME/.claude/skills/relay"
   local refs_dir="${skill_dir}/references"
-  local raw_base="https://raw.githubusercontent.com/${REPO}/main/skill/relay"
-
   mkdir -p "$refs_dir"
 
   # Migrate from legacy command location.
@@ -700,30 +825,25 @@ install_skill() {
     info "Removed legacy ${DIM}${legacy_cmd}${RESET}"
   fi
 
-  local tmpdir
-  tmpdir=$(mktemp -d)
+  ensure_skill_bundle
 
   local skill_ok=false
-  if curl -fsSL "${raw_base}/SKILL.md" -o "$tmpdir/SKILL.md" 2>/dev/null; then
-    cp "$tmpdir/SKILL.md" "${skill_dir}/SKILL.md"
+  if [[ -f "$SKILL_BUNDLE_DIR/SKILL.md" ]]; then
+    install -m 644 "$SKILL_BUNDLE_DIR/SKILL.md" "${skill_dir}/SKILL.md"
     skill_ok=true
   fi
 
   local refs_ok=false
-  if curl -fsSL "${raw_base}/references/tools-reference.md" -o "$tmpdir/tools-reference.md" 2>/dev/null; then
-    cp "$tmpdir/tools-reference.md" "${refs_dir}/tools-reference.md"
+  if [[ -f "$SKILL_BUNDLE_DIR/references/tools-reference.md" ]]; then
+    install -m 644 "$SKILL_BUNDLE_DIR/references/tools-reference.md" "${refs_dir}/tools-reference.md"
     refs_ok=true
   fi
 
-  rm -rf "$tmpdir"
-
   if [[ "$skill_ok" == false ]]; then
-    warn "Couldn't download SKILL.md — relay skill will be incomplete"
-    warn "Manually download from: ${raw_base}/SKILL.md"
+    warn "SKILL.md missing from bundle — relay skill will be incomplete"
   fi
   if [[ "$refs_ok" == false ]]; then
-    warn "Couldn't download tools-reference.md — relay skill reference unavailable"
-    warn "Manually download from: ${raw_base}/references/tools-reference.md"
+    warn "tools-reference.md missing from bundle — skill reference unavailable"
   fi
 
   if [[ "$skill_ok" == true ]] || [[ "$refs_ok" == true ]]; then
@@ -964,8 +1084,22 @@ verify_installation() {
   fi
 
   # Check hooks
-  if [[ -x "$HOME/.claude/hooks/ingest-post-tool.sh" ]] && [[ -x "$HOME/.claude/hooks/ingest-stop.sh" ]]; then
-    success "Hooks: activity tracking installed"
+  local hooks_dir="$HOME/.claude/hooks"
+  local expected_hooks=(
+    "ingest-pre-tool.sh"
+    "ingest-post-tool.sh"
+    "ingest-stop.sh"
+    "ingest-subagent-start.sh"
+    "ingest-subagent-stop.sh"
+  )
+  local hooks_found=0
+  for h in "${expected_hooks[@]}"; do
+    [[ -x "${hooks_dir}/${h}" ]] && ((hooks_found++))
+  done
+  if [[ $hooks_found -eq ${#expected_hooks[@]} ]]; then
+    success "Hooks: activity tracking installed (${hooks_found}/${#expected_hooks[@]})"
+  elif [[ $hooks_found -gt 0 ]]; then
+    warn "Hooks: partial install (${hooks_found}/${#expected_hooks[@]})"
   else
     warn "Hooks: activity tracking not found"
   fi

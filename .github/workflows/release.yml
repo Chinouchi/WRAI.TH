@@ -99,6 +99,14 @@ jobs:
 
           VERSION="${GITHUB_REF_NAME}"
 
+          # Stamp the version into the installer so its skill/hooks/source
+          # fetches resolve to this exact tag instead of `main`.
+          sed -i "s|@@RELAY_VERSION@@|${VERSION}|g" scripts/install.sh
+
+          # Bundle the skill (SKILL.md + references/ + hooks/) so the installer
+          # fetches everything in one shot from this release.
+          tar -czf skill-relay.tar.gz -C skill/relay .
+
           # Create release if it doesn't exist, then upload assets
           gh release create "$VERSION" \
             --title "$VERSION" \
@@ -110,4 +118,5 @@ jobs:
             artifacts/agent-relay-*.tar.gz \
             artifacts/agent-relay-*.zip \
             scripts/install.sh \
+            skill-relay.tar.gz \
             --clobber

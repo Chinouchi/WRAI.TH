@@ -112,7 +112,7 @@ Rules:
 
 ## Activity Tracking
 
-The relay tracks real-time agent activity via Claude Code hooks. Copy hook scripts from `skill/hooks/` to `~/.claude/hooks/` and add to `~/.claude/settings.json`:
+The relay tracks real-time agent activity via Claude Code hooks. The installer wires these automatically. Manual setup: copy scripts from `skill/relay/hooks/` (in the repo) to `~/.claude/hooks/` and add to `~/.claude/settings.json`:
 
 ```json
 {
