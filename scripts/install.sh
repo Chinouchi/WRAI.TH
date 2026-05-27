@@ -211,11 +211,18 @@ do_uninstall() {
     success "Removed binary"
   fi
 
-  # Remove skill
-  local skill_path="$HOME/.claude/commands/relay.md"
-  if [[ -f "$skill_path" ]]; then
-    rm -f "$skill_path"
+  # Remove skill (new location)
+  local skill_dir="$HOME/.claude/skills/relay"
+  if [[ -d "$skill_dir" ]]; then
+    rm -rf "$skill_dir"
     success "Removed /relay skill"
+  fi
+
+  # Remove legacy command (older installs)
+  local legacy_cmd="$HOME/.claude/commands/relay.md"
+  if [[ -f "$legacy_cmd" ]]; then
+    rm -f "$legacy_cmd"
+    success "Removed legacy /relay command"
   fi
 
   # Data directory
@@ -680,81 +687,48 @@ with open(path, 'w') as f:
 install_skill() {
   step 4 "Installing /relay skill"
 
-  local skill_dir="$HOME/.claude/commands"
-  local skill_path="${skill_dir}/relay.md"
+  local skill_dir="$HOME/.claude/skills/relay"
+  local refs_dir="${skill_dir}/references"
+  local raw_base="https://raw.githubusercontent.com/${REPO}/main/skill/relay"
 
-  mkdir -p "$skill_dir"
+  mkdir -p "$refs_dir"
 
-  # Download the skill file from repo or use bundled version
+  # Migrate from legacy command location.
+  local legacy_cmd="$HOME/.claude/commands/relay.md"
+  if [[ -f "$legacy_cmd" ]]; then
+    rm -f "$legacy_cmd"
+    info "Removed legacy ${DIM}${legacy_cmd}${RESET}"
+  fi
+
   local tmpdir
   tmpdir=$(mktemp -d)
 
-  if curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/skill/relay.md" -o "$tmpdir/relay.md" 2>/dev/null; then
-    cp "$tmpdir/relay.md" "$skill_path"
-  else
-    warn "Couldn't download skill file, creating from template"
-    cat > "$skill_path" <<'SKILL_EOF'
-You are an inter-agent communication assistant using the Agent Relay MCP server.
+  local skill_ok=false
+  if curl -fsSL "${raw_base}/SKILL.md" -o "$tmpdir/SKILL.md" 2>/dev/null; then
+    cp "$tmpdir/SKILL.md" "${skill_dir}/SKILL.md"
+    skill_ok=true
+  fi
 
-## Your Identity
-
-Your agent name is NOT in the URL. On first invocation, ask the user or infer from context, then register with `register_agent`. Use `as` on all calls.
-
-## Commands
-
-Parse the user's arguments from `$ARGUMENTS`:
-
-- **No arguments** or **`inbox`**: Check inbox for unread messages
-- **`send <agent> <message>`**: Send a message to another agent
-- **`agents`**: List all registered agents
-- **`thread <message_id>`**: View a complete conversation thread
-- **`read`**: Mark all unread messages as read
-- **`read <message_id>`**: Mark a specific message as read
-- **`conversations`**: List your conversations with unread counts
-- **`create <title> <agent1> [agent2] ...`**: Create a conversation with specified agents
-- **`msg <conversation_id> <message>`**: Send a message to a conversation
-- **`invite <conversation_id> <agent>`**: Invite an agent to a conversation
-- **`talk`**: Enter conversation mode (proactive loop)
-
-## Your Identity
-
-Your agent name is NOT in the URL. On first invocation, ask the user what name to use (or infer from context), then call `register_agent(name: "<chosen>")`. Use `as: "<chosen>"` on all subsequent tool calls.
-
-## Behavior
-
-### On first invocation
-1. Choose an agent name (ask user or infer from project role)
-2. Call `register_agent` with the name, role, description, and optionally `reports_to`
-3. Then execute the requested command
-
-### Checking inbox (default)
-1. Call `get_inbox` with `unread_only: true`
-2. If there are unread messages, display them clearly
-3. If messages are questions, suggest replying with `/relay send <agent> <reply>`
-4. After displaying, call `mark_read` with all displayed message IDs
-
-### Sending a message
-1. Parse: first word after `send` is the recipient, rest is the message content
-2. Call `send_message` with `type: "notification"` (or `question` if the message ends with `?`)
-3. Use a sensible subject derived from the first ~5 words of the message
-4. Confirm the message was sent
-
-### Listing agents
-1. Call `list_agents`
-2. Display as a table with name, role, and last seen time
-
-### Viewing a thread
-1. Call `get_thread` with the message ID
-2. Display the full conversation chronologically
-
-### Marking as read
-1. If no message ID: call `get_inbox` then `mark_read` with all message IDs
-2. If message ID provided: call `mark_read` with just that ID
-SKILL_EOF
+  local refs_ok=false
+  if curl -fsSL "${raw_base}/references/tools-reference.md" -o "$tmpdir/tools-reference.md" 2>/dev/null; then
+    cp "$tmpdir/tools-reference.md" "${refs_dir}/tools-reference.md"
+    refs_ok=true
   fi
 
   rm -rf "$tmpdir"
-  success "Installed /relay command at ${DIM}${skill_path}${RESET}"
+
+  if [[ "$skill_ok" == false ]]; then
+    warn "Couldn't download SKILL.md — relay skill will be incomplete"
+    warn "Manually download from: ${raw_base}/SKILL.md"
+  fi
+  if [[ "$refs_ok" == false ]]; then
+    warn "Couldn't download tools-reference.md — relay skill reference unavailable"
+    warn "Manually download from: ${raw_base}/references/tools-reference.md"
+  fi
+
+  if [[ "$skill_ok" == true ]] || [[ "$refs_ok" == true ]]; then
+    success "Installed /relay skill at ${DIM}${skill_dir}${RESET}"
+  fi
 }
 
 # ── Step 5: Scan and configure projects ──────────────────────────────────────
@@ -958,7 +932,7 @@ This project uses [Agent Relay](https://github.com/Synergix-lab/WRAI.TH) for mul
 
 - Use \`/relay\` to check inbox, send messages, dispatch tasks, and run autonomous work loops
 - Use \`/relay create_project\` to set up the full colony (teams, goals, profiles, sprint tasks)
-- Full docs: \`skill/relay.md\` (skill reference) and \`docs/\` (guides)
+- Full docs: \`skill/relay/SKILL.md\` (skill reference) and \`docs/\` (guides)
 RELAYEOF
     fi
   fi
@@ -997,8 +971,8 @@ verify_installation() {
   fi
 
   # Check skill
-  if [[ -f "$HOME/.claude/commands/relay.md" ]]; then
-    success "Skill: /relay command installed"
+  if [[ -f "$HOME/.claude/skills/relay/SKILL.md" ]]; then
+    success "Skill: /relay installed"
   else
     warn "Skill: not found"
   fi
