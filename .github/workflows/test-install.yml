@@ -8,11 +8,13 @@ on:
     paths:
       - 'install.sh'
       - 'install.ps1'
+      - 'scripts/install.sh'
       - '.github/workflows/test-install.yml'
   pull_request:
     paths:
       - 'install.sh'
       - 'install.ps1'
+      - 'scripts/install.sh'
   workflow_dispatch:
 
 jobs:
@@ -43,7 +45,7 @@ jobs:
           fi
 
       - name: Run installer
-        run: bash install.sh --no-service --skip-projects
+        run: bash scripts/install.sh --no-service --skip-projects
 
       - name: Verify binary
         run: |
@@ -69,7 +71,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Run installer
-        run: bash install.sh --no-service --skip-projects
+        run: bash scripts/install.sh --no-service --skip-projects
 
       - name: Verify binary
         run: |
@@ -110,7 +112,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Run installer (should build from source)
-        run: bash install.sh --no-service --skip-projects
+        run: bash scripts/install.sh --no-service --skip-projects
 
       - name: Verify binary
         run: |

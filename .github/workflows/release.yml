@@ -106,6 +106,6 @@ jobs:
           gh release upload "$VERSION" \
             artifacts/agent-relay-*.tar.gz \
             artifacts/agent-relay-*.zip \
-            install.sh \
+            scripts/install.sh \
             install.ps1 \
             --clobber
